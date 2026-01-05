@@ -1,0 +1,27 @@
+# 最小可行网络云盘 - 依赖包
+# 使用 pip install -r requirements.txt 安装
+
+# FastAPI 框架（Web框架）
+fastapi==0.108.0
+
+# ASGI服务器（支持HTTP/2）
+uvicorn[standard]==0.25.0
+
+# Python标准库外的额外依赖：
+# - typing_extensions: FastAPI的类型支持
+# - pydantic: FastAPI的数据验证
+# - starlette: FastAPI的底层ASGI框架
+
+# 开发依赖（可选）
+python-multipart==0.0.6  # 文件上传支持（FastAPI已包含，显式声明版本）
+
+# 注意：选择此版本是因为：
+# 1. fastapi 0.108.0 稳定且功能完整
+# 2. uvicorn 0.25.0 支持HTTP/2（standard变体）
+# 3. 这些版本兼容性好，被广泛使用
+
+# v2: 可考虑添加：
+# - redis: 用于分布式会话存储
+# - sqlalchemy: 数据库ORM
+# - alembic: 数据库迁移
+# - python-dotenv: 环境变量管理
