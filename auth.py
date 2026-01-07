@@ -107,6 +107,7 @@ class AuthMiddleware:
         支持格式：Authorization: Bearer <token>
         """
         auth_header = request.headers.get("Authorization")
+        print(auth_header)
         if not auth_header:
             return None
             

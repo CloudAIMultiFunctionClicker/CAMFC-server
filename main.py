@@ -33,7 +33,12 @@ from config import ensure_dirs, LOG_LEVEL, LOG_FORMAT
 from auth import AuthMiddleware
 from upload import router as upload_router
 from download import router as download_router
-from file_manager import router as file_manager_router
+# 导入新的模块化路由
+from api.file_operations.browse import router as file_browse_router
+from api.file_management.operations import router as file_operations_router
+from api.file_management.search import router as file_search_router
+from api.file_management.trash import router as file_trash_router
+from api.file_management.thumbnails import router as file_thumbnails_router
 
 # 配置日志
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -56,20 +61,24 @@ logger.info("初始化目录结构完成")
 # HACK: 开发环境下允许所有来源，生产环境应限制
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # v2: 应配置为前端域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:1420"], # 明确指定允许的源
+    allow_credentials=True,                      # 允许带 Cookie/Token
+    allow_methods=["*"],                         # 允许所有 HTTP 方法
+    allow_headers=["*"],                         # 允许所有请求头
+    # max_age=3600, # 可选：设置预检请求缓存时间
 )
-
-# 添加Token鉴权中间件
-# 注意：这里我们使用了自定义的ASGI中间件
+# AuthMiddleware 放在 CORS 之后
 app.add_middleware(AuthMiddleware)
 
 # 注册路由
 app.include_router(upload_router)
 app.include_router(download_router)
-app.include_router(file_manager_router)
+# 注册新的模块化路由
+app.include_router(file_browse_router)       # 文件浏览和列表功能
+app.include_router(file_operations_router)   # 基本文件操作（删除、重命名、移动、复制、创建目录）
+app.include_router(file_search_router)       # 搜索和打包下载
+app.include_router(file_trash_router)        # 回收站管理
+app.include_router(file_thumbnails_router)   # 缩略图功能
 
 
 @app.get("/")
