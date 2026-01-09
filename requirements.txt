@@ -7,6 +7,9 @@ fastapi==0.108.0
 # ASGI服务器（支持HTTP/2）
 uvicorn[standard]==0.25.0
 
+# 缩略图生成依赖
+Pillow==10.1.0  # 图像处理库
+
 # Python标准库外的额外依赖：
 # - typing_extensions: FastAPI的类型支持
 # - pydantic: FastAPI的数据验证

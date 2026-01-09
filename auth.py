@@ -84,7 +84,8 @@ class AuthMiddleware:
         
         # 检查是否需要鉴权
         path = request.url.path
-        if path.startswith("/upload") or path.startswith("/download"):
+        if (path.startswith("/upload") or path.startswith("/download") or 
+            path.startswith("/files")):
             # 需要鉴权的接口
             token = self._extract_token(request)
             if not token:
@@ -106,6 +107,7 @@ class AuthMiddleware:
         支持格式：Authorization: Bearer <token>
         """
         auth_header = request.headers.get("Authorization")
+        print(auth_header)
         if not auth_header:
             return None
             
