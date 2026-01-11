@@ -421,7 +421,7 @@ def _human_readable_size(size_bytes: int) -> str:
     unit_index = 0
     
     while size_bytes >= 1024 and unit_index < len(units) - 1:
-        size_bytes /= 1024.0
+        size_bytes = size_bytes // 1024
         unit_index += 1
     
     return f"{size_bytes:.2f} {units[unit_index]}"

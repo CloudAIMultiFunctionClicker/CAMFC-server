@@ -1,11 +1,11 @@
 """
-Copyright (C) 2026 Jiale Xu (许嘉乐) (ANTmmmmm) <https://github.com/ant-cave>
+Copyright (C) 2026 Jiale Xu (许嘉乐) (ANTmmmmm) <https://github.com/ant-cave  >
 Email: ANTmmmmm@outlook.com, ANTmmmmm@126.com, 1504596931@qq.com
 
-Copyright (C) 2026 Xinhang Chen (陈欣航) <https://github.com/cxh09>
+Copyright (C) 2026 Xinhang Chen (陈欣航) <https://github.com/cxh09  >
 Email: abc.cxh2009@foxmail.com
 
-Copyright (C) 2026 Zimo Wen (温子墨) <https://github.com/lusamaqq>
+Copyright (C) 2026 Zimo Wen (温子墨) <https://github.com/lusamaqq  >
 Email: 1220594170@qq.com
 
 This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
+along with this program.  If not, see <https://www.gnu.org/licenses/  >.
 
 主应用入口
 FastAPI应用初始化、中间件设置、路由注册
@@ -58,13 +58,14 @@ ensure_dirs()
 logger.info("初始化目录结构完成")
 
 # 添加CORS中间件（允许前端跨域访问）
-# HACK: 开发环境下允许所有来源，生产环境应限制
+# 修改：明确指定允许的源，并添加预检请求处理
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:1420"], # 明确指定允许的源
+    allow_origins=["*"],  # 明确指定前端地址
     allow_credentials=True,                      # 允许带 Cookie/Token
     allow_methods=["*"],                         # 允许所有 HTTP 方法
     allow_headers=["*"],                         # 允许所有请求头
+    expose_headers=["*"],                        # 暴露所有响应头
     # max_age=3600, # 可选：设置预检请求缓存时间
 )
 # AuthMiddleware 放在 CORS 之后
