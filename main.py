@@ -26,11 +26,11 @@ FastAPI应用初始化、中间件设置、路由注册
 """
 
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import ensure_dirs, LOG_LEVEL, LOG_FORMAT
-from auth import AuthMiddleware
+from auth import AuthMiddleware, verify_token
 from upload import router as upload_router
 from download import router as download_router
 # 导入新的模块化路由
@@ -103,6 +103,45 @@ async def root():
 async def health_check():
     """健康检查接口"""
     return {"status": "healthy"}
+
+
+@app.get("/test")
+async def test_token(request: Request):
+    """测试Token是否正确的接口
+    
+    从Authorization头提取token并验证，返回验证结果。
+    这个路由本身不需要被AuthMiddleware保护，否则没token的用户就测不了了。
+    
+    注意：目前测试用的token是 'test123'（见auth.py里的verify_token函数）
+    """
+    # 尝试从请求头提取token
+    auth_header = request.headers.get("Authorization")
+    
+    if not auth_header:
+        return {
+            "valid": False
+        }
+    
+    # 解析Bearer token
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return {
+            "valid": False
+        }
+    
+    token = parts[1]
+    
+    # 使用auth.py里的验证函数
+    is_valid = verify_token(token)
+    
+    if is_valid:
+        return {
+            "valid": True
+        }
+    else:
+        return {
+            "valid": False
+        }
 
 
 # 启动应用（仅供直接运行，uvicorn会使用此模块）
