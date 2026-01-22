@@ -30,10 +30,10 @@ import mimetypes
 from pathlib import Path
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, status, Header, Response
+from fastapi import APIRouter, HTTPException, status, Header, Response, Request
 from fastapi.responses import FileResponse
 
-from config import STORAGE_DIR, get_file_path
+from config import STORAGE_DIR, get_user_file_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/download", tags=["download"])
@@ -118,26 +118,39 @@ def parse_range_header(range_header: Optional[str], file_size: int) -> Optional[
 
 @router.get("/{file_id}")
 async def download_file(
+    request: Request,  # 添加Request参数，用于获取用户UUID
     file_id: str,
     range_header: Optional[str] = Header(None, alias="Range"),
 ) -> Response:
-    """下载文件，支持HTTP断点续传
+    """下载文件，支持HTTP断点续传（重构版，支持用户隔离存储）
     
     支持标准Range头：Range: bytes=0-999
     若无Range：返回200 OK + 全文件
     若有Range：返回206 Partial Content + Content-Range
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         file_id: 文件ID（SHA256哈希或UUID）
         range_header: Range请求头
         
     Returns:
         Response: 文件响应（完整或部分内容）
     """
-    # 查找文件
-    file_path = get_file_path(file_id)
+    # 从请求状态获取用户UUID（认证中间件应该已经设置好了）
+    user_uuid = getattr(request.state, 'user_uuid', None)
+    
+    if not user_uuid:
+        # 这不应该发生，因为认证中间件应该已经验证了
+        logger.error("下载文件时无法获取用户UUID")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User authentication missing"
+        )
+    
+    # 查找文件（在用户的存储目录中查找）
+    file_path = get_user_file_path(user_uuid, file_id)
     if not file_path or not file_path.exists():
-        logger.warning(f"文件不存在: {file_id}")
+        logger.warning(f"用户文件不存在: user={user_uuid}, file={file_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found"
@@ -213,20 +226,35 @@ async def download_file(
 
 
 @router.head("/{file_id}")
-async def get_file_metadata(file_id: str) -> Response:
-    """获取文件元数据（HEAD请求）
+async def get_file_metadata(
+    request: Request,  # 添加Request参数，用于获取用户UUID
+    file_id: str,
+) -> Response:
+    """获取文件元数据（HEAD请求，重构版，支持用户隔离存储）
     
     用于客户端检查文件是否存在、大小等信息
     支持断点续传：返回Accept-Ranges头
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         file_id: 文件ID
         
     Returns:
         Response: 仅包含头部的响应
     """
-    # 查找文件
-    file_path = get_file_path(file_id)
+    # 从请求状态获取用户UUID（认证中间件应该已经设置好了）
+    user_uuid = getattr(request.state, 'user_uuid', None)
+    
+    if not user_uuid:
+        # 这不应该发生，因为认证中间件应该已经验证了
+        logger.error("获取文件元数据时无法获取用户UUID")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User authentication missing"
+        )
+    
+    # 查找文件（在用户的存储目录中查找）
+    file_path = get_user_file_path(user_uuid, file_id)
     if not file_path or not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

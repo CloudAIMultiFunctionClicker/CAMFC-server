@@ -33,10 +33,10 @@ from pathlib import Path
 from typing import Dict, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, Request
 from fastapi.responses import JSONResponse
 
-from config import UPLOAD_DIR, STORAGE_DIR, CHUNK_SIZE, ensure_dirs
+from config import UPLOAD_DIR, STORAGE_DIR, CHUNK_SIZE, ensure_dirs, get_user_storage_dir
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -168,17 +168,19 @@ async def upload_chunk(
 
 @router.post("/finish")
 async def finish_upload(
+    request: Request,  # 添加Request参数，用于获取用户UUID
     upload_id: str = Query(..., description="上传会话ID"),
     filename: str = Query(..., description="原始文件名"),
     total_chunks: int = Query(..., description="总分片数"),
 ) -> JSONResponse:
-    """完成上传，合并分片
+    """完成上传，合并分片（重构版，支持用户隔离存储）
     
     客户端在所有分片上传完成后调用此接口
     服务端合并分片，计算文件哈希（SHA256）作为文件ID
-    文件最终存储在 ./storage/{file_id}
+    文件最终存储在 ./storage/{user_uuid}/{file_id}
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         upload_id: 上传会话ID
         filename: 原始文件名
         total_chunks: 总分片数
@@ -191,6 +193,18 @@ async def finish_upload(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Upload session not found or expired"
+        )
+    
+    # 从请求状态获取用户UUID（认证中间件应该已经设置好了）
+    # request.state 是Starlette的State对象，我们认证中间件存的是 user_uuid
+    user_uuid = getattr(request.state, 'user_uuid', None)
+    
+    if not user_uuid:
+        # 这不应该发生，因为认证中间件应该已经验证了
+        logger.error("完成上传时无法获取用户UUID")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User authentication missing"
         )
     
     status_info = upload_status[upload_id]
@@ -208,9 +222,12 @@ async def finish_upload(
         )
     
     try:
+        # 获取用户的存储目录
+        user_storage_dir = get_user_storage_dir(user_uuid)
+        
         # 确定最终文件名（防覆盖）
         final_filename = filename
-        final_path = STORAGE_DIR / final_filename
+        final_path = user_storage_dir / final_filename
         
         # 如果文件已存在，添加时间戳后缀
         counter = 1
@@ -222,7 +239,7 @@ async def finish_upload(
             else:
                 final_filename = f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{counter}"
             
-            final_path = STORAGE_DIR / final_filename
+            final_path = user_storage_dir / final_filename
             counter += 1
         
         # 合并分片
@@ -245,11 +262,6 @@ async def finish_upload(
         
         file_id = sha256_hash.hexdigest()
         
-        # 可选：重命名文件为哈希值（便于查找）
-        # hashed_path = STORAGE_DIR / file_id
-        # final_path.rename(hashed_path)
-        # final_path = hashed_path
-        
         # 清理临时文件
         try:
             shutil.rmtree(upload_path)
@@ -257,7 +269,7 @@ async def finish_upload(
         except Exception as e:
             logger.warning(f"清理临时文件失败: {upload_path}, error={e}")
         
-        logger.info(f"上传完成: upload_id={upload_id}, file_id={file_id}, size={final_path.stat().st_size}")
+        logger.info(f"上传完成: user={user_uuid}, upload_id={upload_id}, file_id={file_id}, size={final_path.stat().st_size}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -267,6 +279,7 @@ async def finish_upload(
                 "original_filename": filename,
                 "size": final_path.stat().st_size,
                 "sha256": file_id,
+                "user_uuid": user_uuid,  # 返回用户UUID，客户端可能需要知道
                 "message": "File uploaded and merged successfully"
             }
         )

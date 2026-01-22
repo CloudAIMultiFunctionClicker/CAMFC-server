@@ -61,12 +61,12 @@ logger.info("初始化目录结构完成")
 # 修改：明确指定允许的源，并添加预检请求处理
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 明确指定前端地址
+    allow_origins=["*"],  # 允许所有源
     allow_credentials=True,                      # 允许带 Cookie/Token
     allow_methods=["*"],                         # 允许所有 HTTP 方法
     allow_headers=["*"],                         # 允许所有请求头
     expose_headers=["*"],                        # 暴露所有响应头
-    # max_age=3600, # 可选：设置预检请求缓存时间
+    max_age=600, # 设置预检请求缓存时间（10分钟）
 )
 # AuthMiddleware 放在 CORS 之后
 app.add_middleware(AuthMiddleware)
@@ -95,7 +95,7 @@ async def root():
             "files": "/files/*",
             "docs": "/docs",
         },
-        "note": "使用Authorization: Bearer <token>头进行认证",
+    "note": "使用新的认证格式：请求头包含 {\"Id\": uuid, \"Totp\": totp}",
     }
 
 
@@ -107,40 +107,75 @@ async def health_check():
 
 @app.get("/test")
 async def test_token(request: Request):
-    """测试Token是否正确的接口
+    """测试认证是否正确的接口（重构版，支持新的TOTP认证）
     
-    从Authorization头提取token并验证，返回验证结果。
+    从请求头提取UUID和TOTP码并验证，返回验证结果。
     这个路由本身不需要被AuthMiddleware保护，否则没token的用户就测不了了。
     
-    注意：目前测试用的token是 'test123'（见auth.py里的verify_token函数）
+    注意：现在使用新的认证格式：请求头包含 {"Id": uuid, "Totp": totp}
+    或者自定义头：Id: uuid, Totp: totp
     """
-    # 尝试从请求头提取token
+    # 导入用户认证模块的验证函数
+    try:
+        from user_auth import verify_totp
+    except ImportError:
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        from user_auth import verify_totp
+    
+    # 尝试从请求头提取认证信息（使用新的格式）
+    import json
+    
     auth_header = request.headers.get("Authorization")
     
-    if not auth_header:
+    uuid_str = None
+    totp_code = None
+    
+    if auth_header:
+        # 可能是JSON格式的字符串
+        try:
+            # 去掉可能的Bearer前缀
+            if auth_header.startswith("Bearer "):
+                auth_json_str = auth_header[7:]  # 去掉"Bearer "
+            else:
+                auth_json_str = auth_header
+            
+            auth_data = json.loads(auth_json_str)
+            
+            # 检查必需字段
+            uuid_str = auth_data.get("Id")
+            totp_code = auth_data.get("Totp")
+                
+        except json.JSONDecodeError:
+            # 不是JSON格式，可能是旧版Bearer Token
+            logger.debug("Authorization头不是JSON格式")
+    
+    # 如果上面的方法不行，试试直接读取自定义头
+    if not uuid_str or not totp_code:
+        uuid_str = request.headers.get("Id")
+        totp_code = request.headers.get("Totp")
+    
+    if not uuid_str or not totp_code:
         return {
-            "valid": False
+            "valid": False,
+            "message": "Missing authentication headers. Use format: {\"Id\": uuid, \"Totp\": totp} or headers: Id, Totp"
         }
     
-    # 解析Bearer token
-    parts = auth_header.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return {
-            "valid": False
-        }
-    
-    token = parts[1]
-    
-    # 使用auth.py里的验证函数
-    is_valid = verify_token(token)
+    # 使用新的TOTP验证函数
+    is_valid = verify_totp(uuid_str, totp_code)
     
     if is_valid:
         return {
-            "valid": True
+            "valid": True,
+            "uuid": uuid_str,
+            "message": "Authentication successful"
         }
     else:
         return {
-            "valid": False
+            "valid": False,
+            "uuid": uuid_str,
+            "message": "Authentication failed"
         }
 
 
@@ -150,7 +185,7 @@ if __name__ == "__main__":
     
     logger.info("启动服务器...")
     logger.info("接口文档：http://localhost:8000/docs")
-    logger.info("注意：需设置Authorization头进行测试，测试token: 'test123'")
+    logger.info("注意：现在使用新的认证格式：请求头包含 {\"Id\": uuid, \"Totp\": totp}")
     
     # 启动参数说明：
     # 后续部署 HTTPS 时：

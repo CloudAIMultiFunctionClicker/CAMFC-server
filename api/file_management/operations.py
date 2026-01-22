@@ -1,6 +1,9 @@
 """
 文件操作模块
 提供删除、重命名、移动、复制等文件操作API
+
+重构说明：现在支持用户隔离存储
+所有操作都在用户的存储目录内进行：/storage/{user_uuid}/
 """
 
 import logging
@@ -8,64 +11,72 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import JSONResponse
 
-from config import STORAGE_DIR
-from api.utils.path_utils import _validate_path, _is_safe_operation
+from config import STORAGE_DIR, get_user_storage_dir
+from api.utils.path_utils import validate_user_path, _is_safe_operation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/files", tags=["files"])
 
 
-# 回收站相关（这里先定义，后面可能会移到单独的trash模块）
-TRASH_DIR = STORAGE_DIR / ".trash"
-
-def _ensure_trash_dir():
-    """确保回收站目录存在"""
-    if not TRASH_DIR.exists():
-        TRASH_DIR.mkdir(parents=True, exist_ok=True)
-
-
 @router.delete("/{path:path}")
 async def delete_file_or_directory(
+    request: Request,
     path: str,
     permanent: bool = Query(False, description="是否永久删除（不走回收站）"),
 ) -> JSONResponse:
-    """删除文件或目录
+    """删除文件或目录（重构版，支持用户隔离存储）
     
-    默认移动到回收站（.trash目录），可指定永久删除
+    默认移动到回收站（用户目录内的.trash目录），可指定永久删除
     对于目录会递归删除所有内容
     
     Args:
-        path: 要删除的文件/目录路径（相对于storage目录）
+        request: FastAPI请求对象，用于获取用户UUID
+        path: 要删除的文件/目录路径（相对于用户存储目录）
         permanent: 是否永久删除
         
     Returns:
         JSONResponse: 操作结果
     """
     try:
-        # 验证路径
-        target_path = _validate_path(path)
-        
-        # 如果是根目录，不允许删除
-        if target_path == STORAGE_DIR:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("删除文件时无法获取用户UUID")
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete root storage directory"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
             )
         
+        # 验证路径（相对于用户存储目录）
+        target_path = validate_user_path(user_uuid, path)
+        
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        # 如果是用户的根目录，不允许删除
+        if target_path == user_dir:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete user root directory"
+            )
+        
+        # 用户的回收站目录
+        user_trash_dir = user_dir / ".trash"
+        
         # 如果是.trash目录，特殊处理
-        if target_path == TRASH_DIR:
+        if target_path == user_trash_dir:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot delete trash directory directly"
             )
         
-        # 获取路径信息用于返回
+        # 获取路径信息用于返回（相对于用户目录）
         is_dir = target_path.is_dir()
         item_name = target_path.name
-        item_path = str(target_path.relative_to(STORAGE_DIR))
+        item_path = str(target_path.relative_to(user_dir))
         
         if permanent:
             # 永久删除
@@ -75,15 +86,15 @@ async def delete_file_or_directory(
             else:
                 target_path.unlink()
                 operation = "permanently deleted file"
-            logger.warning(f"永久删除: {item_path}")
+            logger.warning(f"永久删除: user={user_uuid}, path={item_path}")
         else:
             # 移动到回收站
-            _ensure_trash_dir()
+            user_trash_dir.mkdir(exist_ok=True)
             
             # 生成唯一的回收站路径（避免文件名冲突）
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             trash_item_name = f"{timestamp}_{item_name}"
-            trash_path = TRASH_DIR / trash_item_name
+            trash_path = user_trash_dir / trash_item_name
             
             # 移动文件/目录到回收站
             if is_dir:
@@ -92,7 +103,7 @@ async def delete_file_or_directory(
                 shutil.move(str(target_path), str(trash_path))
             
             operation = "moved to trash"
-            logger.info(f"移动到回收站: {item_path} -> {trash_item_name}")
+            logger.info(f"移动到回收站: user={user_uuid}, {item_path} -> {trash_item_name}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -103,6 +114,7 @@ async def delete_file_or_directory(
                 "is_directory": is_dir,
                 "operation": operation,
                 "permanent": permanent,
+                "user_uuid": user_uuid,
                 "message": f"{'Directory' if is_dir else 'File'} {operation} successfully"
             }
         )
@@ -125,15 +137,17 @@ async def delete_file_or_directory(
 
 @router.patch("/rename")
 async def rename_file_or_directory(
-    source_path: str = Query(..., description="原路径（相对于storage目录）"),
+    request: Request,
+    source_path: str = Query(..., description="原路径（相对于用户存储目录）"),
     new_name: str = Query(..., description="新名称（不含路径）"),
 ) -> JSONResponse:
-    """重命名文件或目录（原子操作）
+    """重命名文件或目录（重构版，支持用户隔离存储）
     
     重命名操作是原子的，要么成功要么失败，不会处于中间状态
     新名称不能包含路径分隔符
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         source_path: 原路径
         new_name: 新名称
         
@@ -141,8 +155,17 @@ async def rename_file_or_directory(
         JSONResponse: 操作结果
     """
     try:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("重命名文件时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
+        
         # 验证原路径
-        source = _validate_path(source_path)
+        source = validate_user_path(user_uuid, source_path)
         
         # 检查新名称是否合法
         if not new_name or not new_name.strip():
@@ -176,17 +199,21 @@ async def rename_file_or_directory(
         # 执行重命名（原子操作）
         source.rename(new_path)
         
-        logger.info(f"重命名: {source_path} -> {new_name}")
+        # 获取用户的存储目录，用于计算相对路径
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        logger.info(f"重命名: user={user_uuid}, {source_path} -> {new_name}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "success": True,
-                "old_path": str(source.relative_to(STORAGE_DIR)),
+                "old_path": str(source.relative_to(user_dir)),
                 "old_name": source.name,
-                "new_path": str(new_path.relative_to(STORAGE_DIR)),
+                "new_path": str(new_path.relative_to(user_dir)),
                 "new_name": new_name,
                 "is_directory": source.is_dir(),
+                "user_uuid": user_uuid,
                 "message": f"{'Directory' if source.is_dir() else 'File'} renamed successfully"
             }
         )
@@ -209,15 +236,17 @@ async def rename_file_or_directory(
 
 @router.patch("/move")
 async def move_file_or_directory(
-    source_path: str = Query(..., description="原路径（相对于storage目录）"),
-    dest_path: str = Query(..., description="目标目录路径（相对于storage目录）"),
+    request: Request,
+    source_path: str = Query(..., description="原路径（相对于用户存储目录）"),
+    dest_path: str = Query(..., description="目标目录路径（相对于用户存储目录）"),
 ) -> JSONResponse:
-    """移动文件或目录到新位置（原子操作）
+    """移动文件或目录到新位置（重构版，支持用户隔离存储）
     
     移动操作是原子的，会保持完整的目录结构
     不能移动到自身内部（防止循环）
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         source_path: 原路径
         dest_path: 目标目录路径
         
@@ -225,11 +254,20 @@ async def move_file_or_directory(
         JSONResponse: 操作结果
     """
     try:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("移动文件时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
+        
         # 验证原路径
-        source = _validate_path(source_path)
+        source = validate_user_path(user_uuid, source_path)
         
         # 验证目标路径
-        dest = _validate_path(dest_path)
+        dest = validate_user_path(user_uuid, dest_path)
         
         # 检查目标是否是目录
         if not dest.is_dir():
@@ -239,14 +277,14 @@ async def move_file_or_directory(
             )
         
         # 安全检查：防止移动到自身内部
-        if not _is_safe_operation(source, dest / source.name):
+        new_location = dest / source.name
+        if not _is_safe_operation(source, new_location):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot move directory into itself or its subdirectories"
             )
         
         # 检查目标位置是否已存在同名文件/目录
-        new_location = dest / source.name
         if new_location.exists():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -256,15 +294,19 @@ async def move_file_or_directory(
         # 执行移动（原子操作）
         shutil.move(str(source), str(dest))
         
-        logger.info(f"移动: {source_path} -> {dest_path}")
+        # 获取用户的存储目录，用于计算相对路径
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        logger.info(f"移动: user={user_uuid}, {source_path} -> {dest_path}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "success": True,
-                "old_path": str(source.relative_to(STORAGE_DIR)),
-                "new_path": str(new_location.relative_to(STORAGE_DIR)),
+                "old_path": str(source.relative_to(user_dir)),
+                "new_path": str(new_location.relative_to(user_dir)),
                 "is_directory": source.is_dir(),
+                "user_uuid": user_uuid,
                 "message": f"{'Directory' if source.is_dir() else 'File'} moved successfully"
             }
         )
@@ -287,16 +329,18 @@ async def move_file_or_directory(
 
 @router.post("/copy")
 async def copy_file_or_directory(
-    source_path: str = Query(..., description="原路径（相对于storage目录）"),
-    dest_path: str = Query(..., description="目标目录路径（相对于storage目录）"),
+    request: Request,
+    source_path: str = Query(..., description="原路径（相对于用户存储目录）"),
+    dest_path: str = Query(..., description="目标目录路径（相对于用户存储目录）"),
     overwrite: bool = Query(False, description="是否覆盖已存在的文件"),
 ) -> JSONResponse:
-    """复制文件或目录
+    """复制文件或目录（重构版，支持用户隔离存储）
     
     支持文件和目录的递归复制
     可以选择是否覆盖目标位置已存在的文件
     
     Args:
+        request: FastAPI请求对象，用于获取用户UUID
         source_path: 原路径
         dest_path: 目标目录路径
         overwrite: 是否覆盖
@@ -305,11 +349,20 @@ async def copy_file_or_directory(
         JSONResponse: 操作结果
     """
     try:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("复制文件时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
+        
         # 验证原路径
-        source = _validate_path(source_path)
+        source = validate_user_path(user_uuid, source_path)
         
         # 验证目标路径
-        dest = _validate_path(dest_path)
+        dest = validate_user_path(user_uuid, dest_path)
         
         # 检查目标是否是目录
         if not dest.is_dir():
@@ -346,16 +399,20 @@ async def copy_file_or_directory(
                 new_location.unlink()
             shutil.copy2(str(source), str(new_location))
         
-        logger.info(f"复制: {source_path} -> {dest_path}/{source.name}")
+        # 获取用户的存储目录，用于计算相对路径
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        logger.info(f"复制: user={user_uuid}, {source_path} -> {dest_path}/{source.name}")
         
         return JSONResponse(
             status_code=status.HTTP_201_CREATED,
             content={
                 "success": True,
-                "source_path": str(source.relative_to(STORAGE_DIR)),
-                "dest_path": str(new_location.relative_to(STORAGE_DIR)),
+                "source_path": str(source.relative_to(user_dir)),
+                "dest_path": str(new_location.relative_to(user_dir)),
                 "is_directory": is_dir,
                 "overwritten": overwrite and new_location.exists(),
+                "user_uuid": user_uuid,
                 "message": f"{'Directory' if is_dir else 'File'} copied successfully"
             }
         )
@@ -378,33 +435,47 @@ async def copy_file_or_directory(
 
 @router.post("/directories")
 async def create_directory(
-    path: str = Query(..., description="目录路径（相对于storage目录）"),
+    request: Request,
+    path: str = Query(..., description="目录路径（相对于用户存储目录）"),
     directory_name: str = Query(..., description="要创建的目录名称"),
 ) -> JSONResponse:
-    """创建新目录
+    """创建新目录（重构版，支持用户隔离存储）
     
-    在指定路径下创建新目录
+    在用户存储目录的指定路径下创建新目录
     目录名称不能包含路径分隔符
     
     Args:
-        path: 相对路径（相对于storage目录）
+        request: FastAPI请求对象，用于获取用户UUID
+        path: 相对路径（相对于用户存储目录）
         directory_name: 要创建的目录名称
         
     Returns:
         JSONResponse: 操作结果
     """
     try:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("创建目录时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
+        
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
         # 确定目标目录
         if path:
-            target_path = (STORAGE_DIR / path).resolve()
-            # 安全检查：确保目标路径在STORAGE_DIR内
-            if not str(target_path).startswith(str(STORAGE_DIR.resolve())):
+            target_path = (user_dir / path).resolve()
+            # 安全检查：确保目标路径在用户目录内
+            if not str(target_path).startswith(str(user_dir.resolve())):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Path traversal is not allowed"
                 )
         else:
-            target_path = STORAGE_DIR
+            target_path = user_dir
         
         # 检查路径是否存在且是目录
         if not target_path.exists():
@@ -452,13 +523,14 @@ async def create_directory(
         # 创建目录
         new_dir_path.mkdir(parents=False, exist_ok=False)  # 不创建父目录（父目录应已存在）
         
-        logger.info(f"创建目录成功: {new_dir_path.relative_to(STORAGE_DIR)}")
+        logger.info(f"创建目录成功: user={user_uuid}, {new_dir_path.relative_to(user_dir)}")
         
         # 获取新创建的目录信息
         dir_info = {
             "name": directory_name,
-            "path": str(new_dir_path.relative_to(STORAGE_DIR)),
+            "path": str(new_dir_path.relative_to(user_dir)),
             "created_at": datetime.now().isoformat(),
+            "user_uuid": user_uuid,
             "message": "Directory created successfully"
         }
         

@@ -55,6 +55,9 @@ def get_file_path(file_id: str) -> Optional[Path]:
     
     文件ID可以是SHA256哈希或UUID，对应storage目录下的文件名
     为简化，我们直接按文件名查找（不含子目录）
+    
+    【注意】重构后这个函数可能不太适用了，因为存储变成了用户隔离
+    但先留着，后面再改或者废弃
     """
     # 简单实现：在storage目录下查找同名文件
     file_path = STORAGE_DIR / file_id
@@ -64,3 +67,52 @@ def get_file_path(file_id: str) -> Optional[Path]:
     # v2: 可考虑建立索引数据库或按哈希前缀分目录存储
     logging.warning(f"文件未找到: {file_id}")
     return None
+
+
+def get_user_storage_dir(user_uuid: Optional[str] = None) -> Path:
+    """获取用户的存储目录
+    
+    如果提供了user_uuid，返回 /storage/{user_uuid}/
+    如果没提供，返回根存储目录（兼容旧代码）
+    
+    Args:
+        user_uuid: 用户UUID，可以为None
+    
+    Returns:
+        Path: 用户存储目录路径
+    """
+    if user_uuid:
+        # 用户隔离存储
+        user_dir = STORAGE_DIR / user_uuid
+        # 确保目录存在
+        user_dir.mkdir(exist_ok=True)
+        return user_dir
+    else:
+        # 没提供UUID，返回根目录（可能用于一些不需要用户隔离的操作）
+        return STORAGE_DIR
+
+
+def get_user_file_path(user_uuid: str, file_id: str) -> Optional[Path]:
+    """根据用户UUID和文件ID获取存储路径
+    
+    新版的get_file_path，考虑了用户隔离
+    
+    Args:
+        user_uuid: 用户UUID
+        file_id: 文件ID（文件名或哈希）
+    
+    Returns:
+        Optional[Path]: 文件路径，如果找不到返回None
+    """
+    user_dir = get_user_storage_dir(user_uuid)
+    file_path = user_dir / file_id
+    
+    if file_path.exists():
+        return file_path
+    
+    logging.warning(f"用户文件未找到: user={user_uuid}, file={file_id}")
+    return None
+
+
+# TODO: 需要修改ensure_dirs函数，确保用户目录也会被创建
+# 不过get_user_storage_dir里已经mkdir了，应该够用了
