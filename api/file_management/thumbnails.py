@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Optional
 import io
 
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 
-from config import STORAGE_DIR
-from api.utils.path_utils import _validate_path
+from config import get_user_storage_dir
+from api.utils.path_utils import validate_user_path
 
 logger = logging.getLogger(__name__)
 
@@ -111,21 +111,20 @@ def _generate_thumbnail(
 
 @router.get("/{file_id_or_path}")
 async def get_thumbnail(
+    request: Request,
     file_id_or_path: str,
     width: int = Query(200, ge=50, le=800, description="缩略图宽度"),
     height: int = Query(200, ge=50, le=800, description="缩略图高度"),
     quality: int = Query(85, ge=1, le=100, description="JPEG质量 (1-100)"),
 ) -> StreamingResponse:
-    """获取文件缩略图
+    """获取文件缩略图（重构版，支持用户隔离存储）
     
     为图像文件生成缩略图，支持调整尺寸和质量
     如果不是图像文件或Pillow未安装，返回错误
     
-    其实我有点担心这个API的性能问题，每次请求都实时生成缩略图
-    也许应该加个缓存？不过数据量不大先不管了
-    
     Args:
-        file_id_or_path: 文件ID（SHA256）或相对路径
+        request: FastAPI请求对象，用于获取用户UUID
+        file_id_or_path: 文件ID（SHA256）或相对路径（相对于用户存储目录）
         width: 缩略图宽度
         height: 缩略图高度
         quality: JPEG质量
@@ -134,22 +133,30 @@ async def get_thumbnail(
         StreamingResponse: 缩略图图像流
     """
     try:
-        # 首先尝试作为路径处理
-        file_path = (STORAGE_DIR / file_id_or_path).resolve()
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("获取缩略图时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
         
-        # 安全检查：确保路径在STORAGE_DIR内
-        if not str(file_path).startswith(str(STORAGE_DIR.resolve())):
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        # 首先尝试作为路径处理
+        file_path = None
+        try:
+            file_path = validate_user_path(user_uuid, file_id_or_path)
+        except HTTPException:
             # 如果不是有效路径，尝试作为文件ID查找
-            file_path = None
-            # 这个遍历整个目录找文件ID的方式效率有点低啊...
-            # 不过文件数量不多的话应该还好
-            for potential_file in STORAGE_DIR.rglob("*"):
+            for potential_file in user_dir.rglob("*"):
                 if potential_file.is_file():
                     # 计算文件哈希
                     sha256_hash = hashlib.sha256()
                     try:
                         with open(potential_file, "rb") as f:
-                            # 分块读取，避免大文件内存占用过高
                             for chunk in iter(lambda: f.read(4096), b""):
                                 sha256_hash.update(chunk)
                         file_hash = sha256_hash.hexdigest()
@@ -182,24 +189,20 @@ async def get_thumbnail(
         thumbnail_data = _generate_thumbnail(file_path, width, height, quality)
         
         if thumbnail_data is None:
-            # 这里可能需要区分Pillow未安装和其他错误
-            # 不过对用户来说结果都一样：拿不到缩略图
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to generate thumbnail. Pillow library may not be installed."
             )
         
-        logger.info(f"生成缩略图: {file_path.name}, size={width}x{height}")
-        # 这里可以加个性能统计，记录生成缩略图花了多长时间
+        logger.info(f"生成缩略图: user={user_uuid}, file={file_path.name}, size={width}x{height}")
         
         return StreamingResponse(
             iter([thumbnail_data]),
             media_type="image/jpeg",
             headers={
                 "Content-Type": "image/jpeg",
-                "Cache-Control": "public, max-age=3600"  # 缓存1小时
-                # TODO: 其实应该根据文件修改时间设置更智能的缓存策略
-                # 如果原图没修改，缩略图就不用重新生成
+                "Cache-Control": "public, max-age=3600",
+                "X-User-UUID": user_uuid  # 添加用户UUID到响应头，方便调试
             }
         )
         

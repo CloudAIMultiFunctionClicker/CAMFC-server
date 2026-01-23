@@ -12,21 +12,22 @@ from pathlib import Path
 from typing import Dict, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import JSONResponse
 
-from config import STORAGE_DIR
-from api.utils.path_utils import _validate_path
+from config import STORAGE_DIR, get_user_storage_dir
+from api.utils.path_utils import validate_user_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/files", tags=["files"])
 
 
-def get_file_info(file_path: Path) -> Dict:
+def get_file_info(file_path: Path, user_dir: Path) -> Dict:
     """获取文件的详细信息
     
     Args:
         file_path: 文件路径
+        user_dir: 用户的存储目录
         
     Returns:
         Dict: 文件信息字典
@@ -49,7 +50,7 @@ def get_file_info(file_path: Path) -> Dict:
     
     return {
         "name": file_path.name,
-        "path": str(file_path.relative_to(STORAGE_DIR)),
+        "path": str(file_path.relative_to(user_dir)),
         "size": stat.st_size,
         "sha256": file_hash,
         "mime_type": mime_type or "application/octet-stream",
@@ -62,11 +63,12 @@ def get_file_info(file_path: Path) -> Dict:
     }
 
 
-def get_directory_info(dir_path: Path) -> Dict:
+def get_directory_info(dir_path: Path, user_dir: Path) -> Dict:
     """获取目录信息
     
     Args:
         dir_path: 目录路径
+        user_dir: 用户的存储目录
         
     Returns:
         Dict: 目录信息字典
@@ -80,14 +82,14 @@ def get_directory_info(dir_path: Path) -> Dict:
         
         for entry in dir_path.iterdir():
             if entry.is_file():
-                entries.append(get_file_info(entry))
+                entries.append(get_file_info(entry, user_dir))
                 total_size += entry.stat().st_size
                 file_count += 1
             elif entry.is_dir():
                 dir_stat = entry.stat()
                 entries.append({
                     "name": entry.name,
-                    "path": str(entry.relative_to(STORAGE_DIR)),
+                    "path": str(entry.relative_to(user_dir)),
                     "size": 0,  # 目录大小需要递归计算，这里简单设为0
                     "sha256": None,
                     "mime_type": "inode/directory",
@@ -105,9 +107,9 @@ def get_directory_info(dir_path: Path) -> Dict:
         
         dir_stat = dir_path.stat()
         return {
-            "path": str(dir_path.relative_to(STORAGE_DIR)),
+            "path": str(dir_path.relative_to(user_dir)),
             "name": dir_path.name,
-            "is_root": dir_path == STORAGE_DIR,
+            "is_root": dir_path == user_dir,
             "total_entries": len(entries),
             "file_count": file_count,
             "dir_count": dir_count,
@@ -133,19 +135,21 @@ def get_directory_info(dir_path: Path) -> Dict:
 
 @router.get("/")
 async def list_files(
-    path: Optional[str] = Query(None, description="相对路径，为空时列出根目录"),
+    request: Request,
+    path: Optional[str] = Query(None, description="相对路径，为空时列出用户根目录"),
     recursive: bool = Query(False, description="是否递归列出所有文件"),
     page: int = Query(1, ge=1, description="页码，从1开始"),
     limit: int = Query(100, ge=1, le=100, description="每页数量，最大100"),
 ) -> JSONResponse:
-    """列出文件/目录
+    """列出文件/目录（重构版，支持用户隔离存储）
     
     列出指定目录下的文件和子目录
-    默认列出根目录（storage目录）
+    默认列出用户的根目录（/storage/{user_uuid}/）
     支持分页，每页最多100个文件
     
     Args:
-        path: 相对路径（相对于storage目录）
+        request: FastAPI请求对象，用于获取用户UUID
+        path: 相对路径（相对于用户存储目录）
         recursive: 是否递归列出
         page: 页码，从1开始
         limit: 每页数量，最大100
@@ -154,35 +158,35 @@ async def list_files(
         JSONResponse: 目录信息
     """
     try:
-        # 确定目标目录
-        if path:
-            target_path = (STORAGE_DIR / path).resolve()
-            # 安全检查：确保目标路径在STORAGE_DIR内
-            if not str(target_path).startswith(str(STORAGE_DIR.resolve())):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Path traversal is not allowed"
-                )
-        else:
-            target_path = STORAGE_DIR
-        
-        # 检查路径是否存在
-        if not target_path.exists():
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("列出文件时无法获取用户UUID")
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Directory not found"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
             )
+        
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        # 验证路径（相对于用户存储目录）
+        if path:
+            target_path = validate_user_path(user_uuid, path)
+        else:
+            target_path = user_dir
         
         # 检查是否是目录
         if not target_path.is_dir():
             # 如果是文件，返回文件信息
-            file_info = get_file_info(target_path)
+            file_info = get_file_info(target_path, user_dir)
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content={
                     "is_file": True,
                     "is_dir": False,
                     "file": file_info,
+                    "user_uuid": user_uuid,
                     "message": "This is a file, not a directory"
                 }
             )
@@ -195,7 +199,7 @@ async def list_files(
             
             for file_path in target_path.rglob("*"):
                 if file_path.is_file():
-                    file_info = get_file_info(file_path)
+                    file_info = get_file_info(file_path, user_dir)
                     all_files.append(file_info)
                     total_size += file_path.stat().st_size
                     file_count += 1
@@ -212,7 +216,8 @@ async def list_files(
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content={
-                    "path": str(target_path.relative_to(STORAGE_DIR)),
+                    "path": str(target_path.relative_to(user_dir)),
+                    "user_uuid": user_uuid,
                     "recursive": True,
                     "total_files": file_count,
                     "total_size": total_size,
@@ -226,7 +231,7 @@ async def list_files(
             )
         else:
             # 非递归，列出目录内容
-            dir_info = get_directory_info(target_path)
+            dir_info = get_directory_info(target_path, user_dir)
             
             # 分页处理（对目录条目进行分页）
             all_entries = dir_info.get("entries", [])
@@ -244,6 +249,7 @@ async def list_files(
                 "has_next": page < total_pages,
                 "has_prev": page > 1,
                 "entries": paged_entries,
+                "user_uuid": user_uuid,
             })
             
             return JSONResponse(
@@ -263,29 +269,42 @@ async def list_files(
 
 @router.get("/info/{file_id_or_path}")
 async def get_file_info_by_id(
+    request: Request,
     file_id_or_path: str,
     include_content_hash: bool = Query(True, description="是否包含文件内容哈希（计算较慢）"),
 ) -> JSONResponse:
-    """获取文件详细信息
+    """获取文件详细信息（重构版，支持用户隔离存储）
     
     通过文件ID（SHA256）或路径获取文件详细信息
     
     Args:
-        file_id_or_path: 文件ID（SHA256）或相对路径
+        request: FastAPI请求对象，用于获取用户UUID
+        file_id_or_path: 文件ID（SHA256）或相对路径（相对于用户存储目录）
         include_content_hash: 是否计算文件哈希
         
     Returns:
         JSONResponse: 文件详细信息
     """
     try:
-        # 首先尝试作为路径处理
-        file_path = (STORAGE_DIR / file_id_or_path).resolve()
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("获取文件信息时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
         
-        # 安全检查：确保路径在STORAGE_DIR内
-        if not str(file_path).startswith(str(STORAGE_DIR.resolve())):
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
+        # 首先尝试作为路径处理
+        file_path = None
+        try:
+            file_path = validate_user_path(user_uuid, file_id_or_path)
+        except HTTPException:
             # 如果不是有效路径，尝试作为文件ID查找
-            file_path = None
-            for potential_file in STORAGE_DIR.rglob("*"):
+            for potential_file in user_dir.rglob("*"):
                 if potential_file.is_file():
                     # 计算或比较文件哈希
                     if include_content_hash:
@@ -316,13 +335,16 @@ async def get_file_info_by_id(
             )
         
         # 获取文件信息
-        file_info = get_file_info(file_path)
+        file_info = get_file_info(file_path, user_dir)
         
         # 如果不要求计算哈希，移除哈希字段以加快响应
         if not include_content_hash:
             file_info["sha256"] = None
         
-        logger.info(f"获取文件信息: {file_path.name}, size={file_info['size']}")
+        # 添加用户UUID
+        file_info["user_uuid"] = user_uuid
+        
+        logger.info(f"获取文件信息: user={user_uuid}, file={file_path.name}, size={file_info['size']}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -340,21 +362,36 @@ async def get_file_info_by_id(
 
 
 @router.get("/stats")
-async def get_storage_stats() -> JSONResponse:
-    """获取存储统计信息
+async def get_storage_stats(request: Request) -> JSONResponse:
+    """获取存储统计信息（重构版，支持用户隔离存储）
     
-    返回存储目录的整体统计信息
+    返回用户存储目录的整体统计信息
     
+    Args:
+        request: FastAPI请求对象，用于获取用户UUID
+        
     Returns:
         JSONResponse: 存储统计信息
     """
     try:
+        # 从请求状态获取用户UUID
+        user_uuid = getattr(request.state, 'user_uuid', None)
+        if not user_uuid:
+            logger.error("获取存储统计时无法获取用户UUID")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User authentication missing"
+            )
+        
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
         total_size = 0
         total_files = 0
         total_dirs = 0
         
-        # 遍历storage目录计算统计
-        for entry in STORAGE_DIR.rglob("*"):
+        # 遍历用户存储目录计算统计
+        for entry in user_dir.rglob("*"):
             if entry.is_file():
                 total_size += entry.stat().st_size
                 total_files += 1
@@ -362,22 +399,23 @@ async def get_storage_stats() -> JSONResponse:
                 total_dirs += 1
         
         # 计算根目录统计（排除根目录自身）
-        total_dirs = max(0, total_dirs - 1)  # 减去根目录自身
+        total_dirs = max(0, total_dirs - 1)  # 减去用户根目录自身
         
         # 获取存储目录信息
-        storage_stat = STORAGE_DIR.stat()
+        storage_stat = user_dir.stat()
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
-                "storage_path": str(STORAGE_DIR),
+                "user_uuid": user_uuid,
+                "storage_path": str(user_dir),
                 "total_size_bytes": total_size,
                 "total_size_human": _human_readable_size(total_size),
                 "total_files": total_files,
                 "total_directories": total_dirs,
                 "created_at": datetime.fromtimestamp(storage_stat.st_ctime).isoformat(),
-                "available_space": _get_available_space(STORAGE_DIR),
-                "message": "Storage statistics",
+                "available_space": _get_available_space(user_dir),
+                "message": "User storage statistics",
             }
         )
         
