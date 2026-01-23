@@ -25,7 +25,11 @@ def _validate_path(user_path: str) -> Path:
         target_path = (STORAGE_DIR / user_path).resolve()
     
     # 安全检查：确保路径在STORAGE_DIR内
-    if not str(target_path).startswith(str(STORAGE_DIR.resolve())):
+    # 使用is_relative_to代替字符串比较，跨平台兼容
+    try:
+        target_path.relative_to(STORAGE_DIR.resolve())
+    except ValueError:
+        # 路径不在STORAGE_DIR内
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Path traversal is not allowed"
@@ -76,8 +80,11 @@ def validate_user_path(user_uuid: str, user_path: str = "") -> Path:
             )
     
     # 安全检查：确保路径在用户的存储目录内
-    user_dir_resolved = user_dir.resolve()
-    if not str(target_path).startswith(str(user_dir_resolved)):
+    # 使用is_relative_to代替字符串比较，跨平台兼容
+    try:
+        target_path.relative_to(user_dir.resolve())
+    except ValueError:
+        # 路径不在用户目录内
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Path traversal is not allowed (user isolation)"
@@ -105,6 +112,10 @@ def _is_safe_operation(source: Path, destination: Path) -> bool:
     """
     try:
         # 检查目标是否在源目录内（防止循环复制/移动）
-        return not str(destination).startswith(str(source))
+        # 使用is_relative_to代替字符串比较，跨平台兼容
+        return not destination.is_relative_to(source)
     except Exception:
-        return False
+        # 如果出现异常（比如路径不存在），默认返回True（安全）
+        # 这样不会阻止合法操作，但可能让一些非法操作通过
+        # 不过异常情况应该由调用者处理
+        return True

@@ -97,10 +97,8 @@ async def delete_file_or_directory(
             trash_path = user_trash_dir / trash_item_name
             
             # 移动文件/目录到回收站
-            if is_dir:
-                shutil.move(str(target_path), str(trash_path))
-            else:
-                shutil.move(str(target_path), str(trash_path))
+            # shutil.move接受Path对象，不需要转换为字符串
+            shutil.move(target_path, trash_path)
             
             operation = "moved to trash"
             logger.info(f"移动到回收站: user={user_uuid}, {item_path} -> {trash_item_name}")
@@ -292,7 +290,8 @@ async def move_file_or_directory(
             )
         
         # 执行移动（原子操作）
-        shutil.move(str(source), str(dest))
+        # shutil.move接受Path对象，不需要转换为字符串
+        shutil.move(source, dest)
         
         # 获取用户的存储目录，用于计算相对路径
         user_dir = get_user_storage_dir(user_uuid)
@@ -392,12 +391,14 @@ async def copy_file_or_directory(
             # 复制目录
             if new_location.exists() and overwrite:
                 shutil.rmtree(new_location)
-            shutil.copytree(str(source), str(new_location))
+            # shutil.copytree接受Path对象，不需要转换为字符串
+            shutil.copytree(source, new_location)
         else:
             # 复制文件
             if new_location.exists() and overwrite:
                 new_location.unlink()
-            shutil.copy2(str(source), str(new_location))
+            # shutil.copy2接受Path对象，不需要转换为字符串
+            shutil.copy2(source, new_location)
         
         # 获取用户的存储目录，用于计算相对路径
         user_dir = get_user_storage_dir(user_uuid)
@@ -468,8 +469,10 @@ async def create_directory(
         # 确定目标目录
         if path:
             target_path = (user_dir / path).resolve()
-            # 安全检查：确保目标路径在用户目录内
-            if not str(target_path).startswith(str(user_dir.resolve())):
+            # 安全检查：确保目标路径在用户目录内（使用is_relative_to，跨平台兼容）
+            try:
+                target_path.relative_to(user_dir.resolve())
+            except ValueError:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Path traversal is not allowed"

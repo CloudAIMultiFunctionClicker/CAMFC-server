@@ -142,12 +142,21 @@ def verify_totp(uuid_str: str, totp_code: str) -> bool:
         return False
 
     # 创建TOTP对象
-    correct_code=utotp.generate_totp(totp_key)
+    correct_code=utotp.generate_totp(totp_key,custume_time=time.time())
     
-    last_code = utotp.generate_totp(totp_key,time_move=-30)
+    last_code = utotp.generate_totp(totp_key,time_move=-30,custume_time=time.time())
+    
+    next_code = utotp.generate_totp(totp_key,time_move=30,custume_time=time.time())
 
     # 验证输入的TOTP码
-    is_valid = (correct_code == totp_code)or (last_code == totp_code)
+    is_valid = (correct_code == totp_code)or (last_code == totp_code) or (next_code == totp_code)
+    
+    if correct_code == totp_code:
+        logger.info(f"刚好")
+    elif last_code == totp_code:
+        logger.info(f"慢了一点点")
+    elif next_code == totp_code:
+        logger.info(f"快了一点点")
 
     if is_valid:
         logger.debug(f"TOTP验证通过: uuid={uuid_str}")
@@ -156,7 +165,10 @@ def verify_totp(uuid_str: str, totp_code: str) -> bool:
     logger.info('匹配的uuid : '+uuid_str)
     logger.info('收到的totp : '+str(totp_code))
     logger.info('正确的totp : '+str(correct_code))
-    logger.info('正确的totp key: '+str(totp_key))
+    logger.info('\n')
+    
+    logger.info('上一个totp : '+str(last_code))
+    logger.info('下一个totp : '+str(next_code))
 
     logger.warning(f"time:{time.time()}\ttotp:{correct_code}")
     
