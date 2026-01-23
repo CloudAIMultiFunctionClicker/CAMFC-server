@@ -30,7 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import ensure_dirs, LOG_LEVEL, LOG_FORMAT
-from auth import AuthMiddleware, verify_token
+from auth import AuthMiddleware
 from upload import router as upload_router
 from download import router as download_router
 # 导入新的模块化路由

@@ -53,14 +53,17 @@ class Sha1HMAC:
 TEST_TIMESTAMP = 1767225600  # 对应 2026-01-01 00:00:00 UTC
 
 
-def get_epoch(test_mode=False):
+def get_epoch(test_mode=False,time_move=0,custume_time=0):
     """获取标准化的时间戳（兼容MicroPython非标准纪元）"""
     if test_mode:
         return TEST_TIMESTAMP
-    maybe_time = time()
+    if time_move != 0:
+        maybe_time=custume_time
+    else:
+        maybe_time = time()
     if maybe_time < 946684801:  # 2000-01-01的时间戳
         maybe_time += 946684801
-    return int(maybe_time)
+    return int(maybe_time+time_move)
 
 
 def hotp(key, counter, digits=6):
@@ -169,7 +172,7 @@ def b32decode(s):
     return b"".join(parts)
 
 
-def generate_totp(secret, digits=6, time_step=30, test_mode=False):
+def generate_totp(secret, digits=6, time_step=30, test_mode=False,time_move=0,custume_time=0):
     """
     生成TOTP动态验证码（对外暴露的核心接口）
     :param secret: Base32格式的密钥字符串（无需手动补=）
@@ -186,7 +189,7 @@ def generate_totp(secret, digits=6, time_step=30, test_mode=False):
         # 解码Base32密钥为字节
         key_bytes = b32decode(secret_padded)
         # 计算时间计数器并生成验证码
-        counter = get_epoch(test_mode=test_mode) // time_step
+        counter = get_epoch(test_mode=test_mode,time_move=time_move,custume_time=custume_time) // time_step
         return hotp(key_bytes, counter, digits)
     except Exception as e:
         raise ValueError(f"生成TOTP失败：{str(e)}")

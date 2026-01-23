@@ -29,30 +29,14 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Scope, Receive, Send
 
-# 导入我们自己写的用户认证模块
-try:
-    from user_auth import verify_totp
-except ImportError:
-    # 如果导入失败，可能是路径问题，加个兜底
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from user_auth import verify_totp
+# 导入用户认证模块
+# 注意：这里直接导入，因为user_auth.py在同一目录下
+# 如果导入失败，说明路径有问题，需要检查项目结构
+from user_auth import verify_totp
 
 logger = logging.getLogger(__name__)
 
 
-# 旧的verify_token函数留着，可能其他地方还用到了
-def verify_token(token: str) -> bool:
-    """验证Token有效性（旧版Bearer Token验证）
-    
-    【注意】重构后这个函数应该用不上了，但先留着以防万一
-    """
-    if token == "test123":
-        return True
-
-    logger.warning(f"Token验证失败（旧版）: {token[:10]}...")
-    return False
 
 
 class AuthMiddleware:
@@ -113,17 +97,20 @@ class AuthMiddleware:
     def _extract_auth_info(self, request: Request) -> Optional[Tuple[str, str]]:
         """从请求头提取UUID和TOTP码
         
-        新格式：请求头包含 {"Id": uuid, "Totp": totp}
-        返回 (uuid, totp_code) 或 None（提取失败）
+        支持的格式：
+        1. 自定义头：Id: uuid, Totp: totp
+        2. JSON格式的Authorization头：{"Id": uuid, "Totp": totp}
         """
-        # 尝试从Authorization头提取（兼容旧格式？）
-        # 但新格式应该是直接的自定义头
-        # 先试试看有没有 "Authorization" 头，格式可能是 {"Id":..., "Totp":...}
+        # 首选：直接读取自定义头（更简洁）
+        uuid_str = request.headers.get("Id")
+        totp_code = request.headers.get("Totp")
         
+        if uuid_str and totp_code:
+            return str(uuid_str), str(totp_code)
+        
+        # 备选：尝试从Authorization头提取JSON格式
         auth_header = request.headers.get("Authorization")
-        
         if auth_header:
-            # 可能是JSON格式的字符串
             try:
                 # 去掉可能的Bearer前缀
                 if auth_header.startswith("Bearer "):
@@ -132,29 +119,18 @@ class AuthMiddleware:
                     auth_json_str = auth_header
                 
                 auth_data = json.loads(auth_json_str)
-                
-                # 检查必需字段
                 uuid_str = auth_data.get("Id")
                 totp_code = auth_data.get("Totp")
                 
                 if uuid_str and totp_code:
                     return str(uuid_str), str(totp_code)
-                    
             except json.JSONDecodeError:
-                logger.debug("Authorization头不是JSON格式，可能是旧版Bearer Token")
+                logger.debug("Authorization头不是有效的JSON格式")
             except Exception as e:
                 logger.warning(f"解析认证头失败: {e}")
         
-        # 如果上面的方法不行，试试直接读取自定义头
-        # 有些客户端可能直接发送自定义头
-        uuid_from_header = request.headers.get("Id")
-        totp_from_header = request.headers.get("Totp")
-        
-        if uuid_from_header and totp_from_header:
-            return str(uuid_from_header), str(totp_from_header)
-        
-        # 都失败了
-        logger.warning("无法从请求头提取认证信息")
+        # 提取失败
+        logger.debug("无法从请求头提取认证信息")
         return None
     
     async def _unauthorized_response(self, scope: Scope, receive: Receive, send: Send):

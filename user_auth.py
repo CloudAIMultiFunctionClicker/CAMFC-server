@@ -4,7 +4,7 @@
 存储格式：{uuid: totp_raw_key} 的JSON文件
 """
 
-import json
+import json,time
 import os
 import logging
 from pathlib import Path
@@ -142,10 +142,12 @@ def verify_totp(uuid_str: str, totp_code: str) -> bool:
         return False
 
     # 创建TOTP对象
-    correct_code=utotp.generate_totp(totp_key,test_mode=True)
+    correct_code=utotp.generate_totp(totp_key)
+    
+    last_code = utotp.generate_totp(totp_key,time_move=-30)
 
     # 验证输入的TOTP码
-    is_valid = (correct_code == totp_code)
+    is_valid = (correct_code == totp_code)or (last_code == totp_code)
 
     if is_valid:
         logger.debug(f"TOTP验证通过: uuid={uuid_str}")
@@ -156,6 +158,8 @@ def verify_totp(uuid_str: str, totp_code: str) -> bool:
     logger.info('正确的totp : '+str(correct_code))
     logger.info('正确的totp key: '+str(totp_key))
 
+    logger.warning(f"time:{time.time()}\ttotp:{correct_code}")
+    
     return is_valid
 
 

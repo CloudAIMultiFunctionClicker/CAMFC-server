@@ -1,22 +1,9 @@
-# 最小可行网络云盘 - 依赖包
-# 使用 pip install -r requirements.txt 安装
 
-# FastAPI 框架（Web框架）
-fastapi==0.108.0
+fastapi
 
-# ASGI服务器（支持HTTP/2）
-uvicorn[standard]==0.25.0
+uvicorn[standard]
 
-# 缩略图生成依赖
-Pillow==10.1.0  # 图像处理库
+Pillow==10.1.0 
+python-multipart==0.0.6
 
-# Python标准库外的额外依赖：
-# - typing_extensions: FastAPI的类型支持
-# - pydantic: FastAPI的数据验证
-# - starlette: FastAPI的底层ASGI框架
-
-# 开发依赖（可选）
-python-multipart==0.0.6  # 文件上传支持（FastAPI已包含，显式声明版本）
-
-# TOTP认证依赖
-pyotp==2.9.0  # 用于生成和验证TOTP码，重构后认证要用
+pyotp==2.9.0
