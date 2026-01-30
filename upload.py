@@ -37,6 +37,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, R
 from fastapi.responses import JSONResponse
 
 from config import UPLOAD_DIR, STORAGE_DIR, CHUNK_SIZE, ensure_dirs, get_user_storage_dir
+from api.utils.path_utils import validate_user_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -168,22 +169,25 @@ async def upload_chunk(
 
 @router.post("/finish")
 async def finish_upload(
-    request: Request,  # 添加Request参数，用于获取用户UUID
+    request: Request,
     upload_id: str = Query(..., description="上传会话ID"),
     filename: str = Query(..., description="原始文件名"),
     total_chunks: int = Query(..., description="总分片数"),
+    target_path: str = Query("", description="目标路径（相对于用户存储目录），为空则存到根目录"),
 ) -> JSONResponse:
-    """完成上传，合并分片（重构版，支持用户隔离存储）
+    """完成上传，合并分片（重构版，支持用户隔离存储和目标路径）
     
     客户端在所有分片上传完成后调用此接口
     服务端合并分片，计算文件哈希（SHA256）作为文件ID
-    文件最终存储在 ./storage/{user_uuid}/{file_id}
+    文件最终存储在 ./storage/{user_uuid}/{target_path}/{filename}
+    如果target_path为空，则存到 ./storage/{user_uuid}/{filename}
     
     Args:
         request: FastAPI请求对象，用于获取用户UUID
         upload_id: 上传会话ID
         filename: 原始文件名
         total_chunks: 总分片数
+        target_path: 目标路径（相对于用户存储目录）
         
     Returns:
         JSONResponse: 包含文件ID和存储路径
@@ -225,9 +229,21 @@ async def finish_upload(
         # 获取用户的存储目录
         user_storage_dir = get_user_storage_dir(user_uuid)
         
+        # 验证目标路径（如果提供了）
+        if target_path:
+            dest_dir = validate_user_path(user_uuid, target_path)
+            # 确保目标路径是目录
+            if not dest_dir.is_dir():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Target path must be a directory"
+                )
+        else:
+            dest_dir = user_storage_dir
+        
         # 确定最终文件名（防覆盖）
         final_filename = filename
-        final_path = user_storage_dir / final_filename
+        final_path = dest_dir / final_filename
         
         # 如果文件已存在，添加时间戳后缀
         counter = 1
@@ -239,7 +255,7 @@ async def finish_upload(
             else:
                 final_filename = f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{counter}"
             
-            final_path = user_storage_dir / final_filename
+            final_path = dest_dir / final_filename
             counter += 1
         
         # 合并分片
