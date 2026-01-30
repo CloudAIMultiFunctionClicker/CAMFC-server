@@ -29,13 +29,35 @@ import logging
 import mimetypes
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, status, Header, Response, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, status, Header, Request
+from fastapi.responses import FileResponse, StreamingResponse, Response
 
-from config import STORAGE_DIR, get_user_file_path
+from config import STORAGE_DIR
 
 logger = logging.getLogger(__name__)
+
+def safe_content_disposition(filename: str) -> str:
+    """安全构建 Content-Disposition header，处理非ASCII文件名
+    
+    Args:
+        filename: 原始文件名
+        
+    Returns:
+        安全的 Content-Disposition header 值
+    """
+    # 检查文件名是否只包含ASCII字符
+    try:
+        filename.encode('ascii')
+        # 纯ASCII，直接使用
+        return f'attachment; filename="{filename}"'
+    except UnicodeEncodeError:
+        # 包含非ASCII字符，使用RFC 5987编码
+        # UTF-8编码 + 百分号编码
+        encoded = quote(filename, encoding='utf-8')
+        return f"attachment; filename*=UTF-8''{encoded}"
+
 router = APIRouter(prefix="/download", tags=["download"])
 
 
@@ -116,13 +138,13 @@ def parse_range_header(range_header: Optional[str], file_size: int) -> Optional[
         )
 
 
-@router.get("/{file_id}")
+@router.get("/{file_path:path}")
 async def download_file(
     request: Request,  # 添加Request参数，用于获取用户UUID
-    file_id: str,
+    file_path: str,
     range_header: Optional[str] = Header(None, alias="Range"),
-) -> Response:
-    """下载文件，支持HTTP断点续传（重构版，支持用户隔离存储）
+):
+    """下载文件，支持HTTP断点续传（仅使用路径，不支持哈希查找）
     
     支持标准Range头：Range: bytes=0-999
     若无Range：返回200 OK + 全文件
@@ -130,11 +152,11 @@ async def download_file(
     
     Args:
         request: FastAPI请求对象，用于获取用户UUID
-        file_id: 文件ID（SHA256哈希或UUID）
+        file_path: 文件相对路径（相对于用户存储目录）
         range_header: Range请求头
         
     Returns:
-        Response: 文件响应（完整或部分内容）
+        FileResponse | StreamingResponse: 文件响应（完整或部分内容）
     """
     # 从请求状态获取用户UUID（认证中间件应该已经设置好了）
     user_uuid = getattr(request.state, 'user_uuid', None)
@@ -147,38 +169,54 @@ async def download_file(
             detail="User authentication missing"
         )
     
-    # 查找文件（在用户的存储目录中查找）
-    file_path = get_user_file_path(user_uuid, file_id)
-    if not file_path or not file_path.exists():
-        logger.warning(f"用户文件不存在: user={user_uuid}, file={file_id}")
+    # 导入路径验证函数
+    from api.utils.path_utils import validate_user_path
+    
+    try:
+        # 验证路径并获取文件
+        target_path = validate_user_path(user_uuid, file_path)
+    except HTTPException as e:
+        # 路径验证失败（可能是路径不存在或越权访问）
+        logger.warning(f"用户文件路径验证失败: user={user_uuid}, path={file_path}, error={e.detail}")
+        raise
+    
+    if not target_path.exists():
+        logger.warning(f"用户文件不存在: user={user_uuid}, path={file_path}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found"
         )
     
+    if not target_path.is_file():
+        logger.warning(f"路径不是文件: user={user_uuid}, path={file_path}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path is not a file"
+        )
+    
     # 获取文件信息
-    file_size = file_path.stat().st_size
+    file_size = target_path.stat().st_size
     
     # 解析Range头
     range_tuple = parse_range_header(range_header, file_size)
     
     if range_tuple is None:
         # 无Range头，返回完整文件
-        logger.info(f"完整下载: {file_id}, size={file_size}")
+        logger.info(f"完整下载: {file_path}, size={file_size}")
         
         # 猜测MIME类型
-        mime_type, _ = mimetypes.guess_type(file_path.name)
+        mime_type, _ = mimetypes.guess_type(target_path.name)
         if not mime_type:
             mime_type = "application/octet-stream"
         
         return FileResponse(
-            path=file_path,
-            filename=file_path.name,
+            path=target_path,
+            filename=target_path.name,
             media_type=mime_type,
             headers={
                 "Content-Length": str(file_size),
                 "Accept-Ranges": "bytes",
-                "Content-Disposition": f"attachment; filename=\"{file_path.name}\"",
+                "Content-Disposition": safe_content_disposition(target_path.name),
             }
         )
     
@@ -187,12 +225,12 @@ async def download_file(
         start, end = range_tuple
         content_length = end - start + 1
         
-        logger.info(f"部分下载: {file_id}, range={start}-{end}, size={content_length}")
+        logger.info(f"部分下载: {file_path}, range={start}-{end}, size={content_length}")
         
         # 构建部分内容响应
         async def range_content():
             """生成指定范围的文件内容"""
-            with open(file_path, "rb") as f:
+            with open(target_path, "rb") as f:
                 f.seek(start)
                 remaining = content_length
                 chunk_size = 8192  # 8KB 块
@@ -206,7 +244,7 @@ async def download_file(
                     remaining -= len(chunk)
         
         # 猜测MIME类型
-        mime_type, _ = mimetypes.guess_type(file_path.name)
+        mime_type, _ = mimetypes.guess_type(target_path.name)
         if not mime_type:
             mime_type = "application/octet-stream"
         
@@ -214,10 +252,10 @@ async def download_file(
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(content_length),
             "Accept-Ranges": "bytes",
-            "Content-Disposition": f"attachment; filename=\"{file_path.name}\"",
+            "Content-Disposition": safe_content_disposition(target_path.name),
         }
         
-        return Response(
+        return StreamingResponse(
             content=range_content(),
             status_code=status.HTTP_206_PARTIAL_CONTENT,
             media_type=mime_type,
@@ -225,19 +263,19 @@ async def download_file(
         )
 
 
-@router.head("/{file_id}")
+@router.head("/{file_path:path}")
 async def get_file_metadata(
     request: Request,  # 添加Request参数，用于获取用户UUID
-    file_id: str,
+    file_path: str,
 ) -> Response:
-    """获取文件元数据（HEAD请求，重构版，支持用户隔离存储）
+    """获取文件元数据（HEAD请求，仅使用路径，不支持哈希查找）
     
     用于客户端检查文件是否存在、大小等信息
     支持断点续传：返回Accept-Ranges头
     
     Args:
         request: FastAPI请求对象，用于获取用户UUID
-        file_id: 文件ID
+        file_path: 文件相对路径（相对于用户存储目录）
         
     Returns:
         Response: 仅包含头部的响应
@@ -253,23 +291,38 @@ async def get_file_metadata(
             detail="User authentication missing"
         )
     
-    # 查找文件（在用户的存储目录中查找）
-    file_path = get_user_file_path(user_uuid, file_id)
-    if not file_path or not file_path.exists():
+    # 导入路径验证函数
+    from api.utils.path_utils import validate_user_path
+    
+    try:
+        # 验证路径并获取文件
+        target_path = validate_user_path(user_uuid, file_path)
+    except HTTPException as e:
+        # 路径验证失败（可能是路径不存在或越权访问）
+        logger.warning(f"用户文件路径验证失败(HEAD): user={user_uuid}, path={file_path}, error={e.detail}")
+        raise
+    
+    if not target_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File not found"
         )
     
+    if not target_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Path is not a file"
+        )
+    
     # 获取文件信息
-    file_size = file_path.stat().st_size
+    file_size = target_path.stat().st_size
     
     # 猜测MIME类型
-    mime_type, _ = mimetypes.guess_type(file_path.name)
+    mime_type, _ = mimetypes.guess_type(target_path.name)
     if not mime_type:
         mime_type = "application/octet-stream"
     
-    logger.info(f"文件元数据查询: {file_id}, size={file_size}")
+    logger.info(f"文件元数据查询: {file_path}, size={file_size}")
     
     return Response(
         status_code=status.HTTP_200_OK,
@@ -277,7 +330,7 @@ async def get_file_metadata(
             "Content-Length": str(file_size),
             "Accept-Ranges": "bytes",
             "Content-Type": mime_type,
-            "Content-Disposition": f"attachment; filename=\"{file_path.name}\"",
+            "Content-Disposition": safe_content_disposition(target_path.name),
         }
     )
 

@@ -267,19 +267,19 @@ async def list_files(
         )
 
 
-@router.get("/info/{file_id_or_path}")
-async def get_file_info_by_id(
+@router.get("/info/{file_path:path}")
+async def get_file_info_by_path(
     request: Request,
-    file_id_or_path: str,
-    include_content_hash: bool = Query(True, description="是否包含文件内容哈希（计算较慢）"),
+    file_path: str,
+    include_content_hash: bool = Query(False, description="是否包含文件内容哈希（计算较慢，默认关闭）"),
 ) -> JSONResponse:
-    """获取文件详细信息（重构版，支持用户隔离存储）
+    """获取文件详细信息（仅使用路径，不支持哈希查找）
     
-    通过文件ID（SHA256）或路径获取文件详细信息
+    通过相对路径获取文件详细信息
     
     Args:
         request: FastAPI请求对象，用于获取用户UUID
-        file_id_or_path: 文件ID（SHA256）或相对路径（相对于用户存储目录）
+        file_path: 相对路径（相对于用户存储目录）
         include_content_hash: 是否计算文件哈希
         
     Returns:
@@ -295,47 +295,26 @@ async def get_file_info_by_id(
                 detail="User authentication missing"
             )
         
-        # 获取用户的存储目录
-        user_dir = get_user_storage_dir(user_uuid)
+        # 验证路径并获取文件
+        target_path = validate_user_path(user_uuid, file_path)
         
-        # 首先尝试作为路径处理
-        file_path = None
-        try:
-            file_path = validate_user_path(user_uuid, file_id_or_path)
-        except HTTPException:
-            # 如果不是有效路径，尝试作为文件ID查找
-            for potential_file in user_dir.rglob("*"):
-                if potential_file.is_file():
-                    # 计算或比较文件哈希
-                    if include_content_hash:
-                        sha256_hash = hashlib.sha256()
-                        with open(potential_file, "rb") as f:
-                            for chunk in iter(lambda: f.read(4096), b""):
-                                sha256_hash.update(chunk)
-                        file_hash = sha256_hash.hexdigest()
-                        if file_hash == file_id_or_path:
-                            file_path = potential_file
-                            break
-                    else:
-                        # 简单比较文件名（不准确，但快速）
-                        if potential_file.name == file_id_or_path:
-                            file_path = potential_file
-                            break
-        
-        if not file_path or not file_path.exists():
+        if not target_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File not found"
             )
         
-        if not file_path.is_file():
+        if not target_path.is_file():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Path is not a file"
             )
         
+        # 获取用户的存储目录
+        user_dir = get_user_storage_dir(user_uuid)
+        
         # 获取文件信息
-        file_info = get_file_info(file_path, user_dir)
+        file_info = get_file_info(target_path, user_dir)
         
         # 如果不要求计算哈希，移除哈希字段以加快响应
         if not include_content_hash:
@@ -344,7 +323,7 @@ async def get_file_info_by_id(
         # 添加用户UUID
         file_info["user_uuid"] = user_uuid
         
-        logger.info(f"获取文件信息: user={user_uuid}, file={file_path.name}, size={file_info['size']}")
+        logger.info(f"获取文件信息: user={user_uuid}, file={target_path.name}, size={file_info['size']}")
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -354,7 +333,7 @@ async def get_file_info_by_id(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"获取文件信息失败: id={file_id_or_path}, error={e}")
+        logger.error(f"获取文件信息失败: path={file_path}, error={e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get file info: {str(e)}"
