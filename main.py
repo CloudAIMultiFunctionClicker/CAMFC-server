@@ -39,6 +39,7 @@ from api.file_management.operations import router as file_operations_router
 from api.file_management.search import router as file_search_router
 from api.file_management.trash import router as file_trash_router
 from api.file_management.thumbnails import router as file_thumbnails_router
+from api.note.note import router as note_router
 
 # 配置日志
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -80,6 +81,7 @@ app.include_router(file_operations_router)   # 基本文件操作（删除、重
 app.include_router(file_search_router)       # 搜索和打包下载
 app.include_router(file_trash_router)        # 回收站管理
 app.include_router(file_thumbnails_router)   # 缩略图功能
+app.include_router(note_router)              # 笔记功能
 
 
 @app.get("/")

@@ -66,7 +66,8 @@ class AuthMiddleware:
         # 仅对特定路径启用鉴权
         if (path.startswith("/upload") or 
             path.startswith("/download") or 
-            path.startswith("/files")):
+            path.startswith("/files") or
+            path.startswith("/note")):
             
             # 从请求头提取UUID和TOTP码
             auth_result = self._extract_auth_info(request)
